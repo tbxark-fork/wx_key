@@ -155,6 +155,7 @@ std::vector<uintptr_t> RemoteScanner::FindAllPatterns(const RemoteModuleInfo& mo
     // 分块读取和扫描
     const SIZE_T CHUNK_SIZE = 1024 * 1024; // 1MB chunks
     scanBuffer.resize(CHUNK_SIZE + patternLength);
+    int consecutiveFailures = 0;
     
     for (SIZE_T offset = 0; offset < imageSize; offset += CHUNK_SIZE) {
         SIZE_T readSize = min(CHUNK_SIZE + patternLength, imageSize - offset);
@@ -170,10 +171,15 @@ std::vector<uintptr_t> RemoteScanner::FindAllPatterns(const RemoteModuleInfo& mo
         );
         
         if (status != STATUS_SUCCESS || bytesRead == 0) {
+            ++consecutiveFailures;
+            if (consecutiveFailures > 2) {
+                Sleep(5 + (GetTickCount() & 0x3)); // 简单退避
+            }
             continue;
         }
-
+        consecutiveFailures = 0;
         if (bytesRead < patternLength) {
+            Sleep(1 + (GetTickCount() & 0x3));
             continue;
         }
 
@@ -183,6 +189,8 @@ std::vector<uintptr_t> RemoteScanner::FindAllPatterns(const RemoteModuleInfo& mo
                 results.push_back(baseAddress + offset + i);
             }
         }
+        // 轻微节流，避免持续大块读取
+        Sleep(1 + (GetTickCount() & 0x3));
     }
     
     return results;

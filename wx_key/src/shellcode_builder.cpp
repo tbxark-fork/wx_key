@@ -97,7 +97,8 @@ std::vector<BYTE> ShellcodeBuilder::BuildHookShellcode(const ShellcodeConfig& co
 
         // 将真实 RSP 存到伪栈，并构造一个假的返回地址槽位
         code.push(code.rax);                        // [rsp] = original rsp
-        code.push(0);                               // 伪造返回地址，不破坏通用寄存器
+        code.mov(code.rax, (uint64_t)config.trampolineAddress); // 伪造返回地址指向 trampoline
+        code.push(code.rax);
 
         // 恢复 r11/r10/rax 的原始值，确保后续保存寄存器时是原值
         code.mov(code.r11, code.qword[code.rax - 24]);

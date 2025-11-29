@@ -3,6 +3,7 @@
 #include "../include/shellcode_builder.h"
 #include <algorithm>
 #include <cstdio>
+#include <random>
 
 // 简单的x64反汇编长度检测器
 // 支持常见指令，用于计算需要备份多少字节
@@ -114,6 +115,33 @@ namespace {
         _snprintf_s(buffer, sizeof(buffer) - 1, _TRUNCATE, "[RemoteHooker] %s addr=%p size=%zu prot=0x%lx\n",
             label, address, static_cast<size_t>(size), static_cast<unsigned long>(protect));
         OutputDebugStringA(buffer);
+    }
+
+    // 随机填充等长 NOP 序列，降低补丁特征一致性
+    void FillNopPadding(std::vector<BYTE>& code, size_t targetSize) {
+        if (code.size() >= targetSize) {
+            return;
+        }
+        static const std::vector<std::vector<BYTE>> kNops = {
+            {0x90},
+            {0x66, 0x90},
+            {0x0F, 0x1F, 0x00},
+            {0x0F, 0x1F, 0x40, 0x00},
+            {0x0F, 0x1F, 0x44, 0x00, 0x00}
+        };
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<size_t> dist(0, kNops.size() - 1);
+
+        while (code.size() < targetSize) {
+            const auto& seq = kNops[dist(gen)];
+            size_t remaining = targetSize - code.size();
+            if (seq.size() > remaining) {
+                code.push_back(0x90);
+            } else {
+                code.insert(code.end(), seq.begin(), seq.end());
+            }
+        }
     }
 }
 
@@ -238,6 +266,7 @@ bool RemoteHooker::CreateTrampoline(uintptr_t targetAddr) {
         trampolineAddress = 0;
         return false;
     }
+    FlushInstructionCache(hProcess, trampolineAddr, trampolineSize);
     DebugProtectChange("trampoline RX", trampolineAddr, trampolineSize, PAGE_EXECUTE_READ);
     trampolineMemory = std::move(trampMem);
     
@@ -318,6 +347,7 @@ bool RemoteHooker::InstallHook(uintptr_t targetFunctionAddress, const ShellcodeC
         remoteShellcodeAddress = 0;
         return false;
     }
+    FlushInstructionCache(hProcess, remoteShellcode, shellcode.size());
     DebugProtectChange("shellcode RX", remoteShellcode, shellcode.size(), PAGE_EXECUTE_READ);
     shellcodeMemory = std::move(shellMem);
 
@@ -345,10 +375,8 @@ bool RemoteHooker::InstallHook(uintptr_t targetFunctionAddress, const ShellcodeC
         return false;
     }
     
-    // 填充NOP
-    while (hookJump.size() < originalBytes.size()) {
-        hookJump.push_back(0x90); // NOP
-    }
+    // 填充NOP，使用随机化序列减少固定补丁特征
+    FillNopPadding(hookJump, originalBytes.size());
     
     if (useHardwareBreakpoint) {
         // 硬件断点模式：不写补丁，直接返回，由上层负责设置断点/VEH
@@ -369,6 +397,7 @@ bool RemoteHooker::InstallHook(uintptr_t targetFunctionAddress, const ShellcodeC
         
         // 7. 写入Hook跳转指令（原子操作）
         bool writeSuccess = RemoteWrite((PVOID)targetAddress, hookJump.data(), hookJump.size());
+        FlushInstructionCache(hProcess, (PVOID)targetAddress, hookJump.size());
         
         // 8. 恢复原始保护属性
         DWORD tempProtect;
@@ -404,9 +433,18 @@ bool RemoteHooker::UninstallHook() {
         restoreSuccess = RemoteWrite((PVOID)targetAddress, originalBytes.data(), originalBytes.size());
         DWORD tempProtect;
         RemoteProtect((PVOID)targetAddress, originalBytes.size(), oldProtect, &tempProtect);
+        FlushInstructionCache(hProcess, (PVOID)targetAddress, originalBytes.size());
     }
 
-    // 4. 释放远程内存
+    // 释放远程内存前用零填充，减少残留特征
+    if (shellcodeMemory.valid()) {
+        std::vector<BYTE> zero(shellcodeMemory.size(), 0);
+        RemoteWrite(shellcodeMemory.get(), zero.data(), zero.size());
+    }
+    if (trampolineMemory.valid()) {
+        std::vector<BYTE> zero(trampolineMemory.size(), 0);
+        RemoteWrite(trampolineMemory.get(), zero.data(), zero.size());
+    }
     shellcodeMemory.reset();
     remoteShellcodeAddress = 0;
     trampolineMemory.reset();
